@@ -1,4 +1,6 @@
-const pdfjsPath = path => new URL(`vendor/pdfjs/${path}`, import.meta.url).toString()
+/** ABS: Runtime PDF.js assets are served from public/ (see Audiobookshelf sync-pdfjs-vendor.mjs). */
+const PDFJS_BASE_URL = '/vendor/pdfjs/'
+const pdfjsPath = (subpath) => `${PDFJS_BASE_URL}${subpath}`
 
 import './vendor/pdfjs/pdf.mjs'
 const pdfjsLib = globalThis.pdfjsLib
