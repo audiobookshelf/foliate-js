@@ -670,6 +670,7 @@ function rawBytesToString(uint8Array) {
 class MOBI6 {
     parser = new DOMParser()
     serializer = new XMLSerializer()
+    transformTarget = new EventTarget()
     #resourceCache = new Map()
     #textCache = new Map()
     #cache = new Map()
@@ -714,7 +715,7 @@ class MOBI6 {
 
         this.sections = this.#sections.map((section, index) => ({
             id: index,
-            load: () => this.loadSection(section),
+            load: () => this.loadSection(section, index),
             createDocument: () => this.createDocument(section),
             size: section.end - section.start,
         }))
@@ -788,9 +789,12 @@ class MOBI6 {
         }))
     }
     async loadResource(index) {
+        if (!await dispatchLoad(this.transformTarget)) return ''
         if (this.#resourceCache.has(index)) return this.#resourceCache.get(index)
         const raw = await this.mobi.loadResource(index)
-        const url = URL.createObjectURL(new Blob([raw]))
+        const [newData, newType] = await dispatchData(
+            this.transformTarget, raw, undefined, index)
+        const url = URL.createObjectURL(new Blob([newData], { type: newType }))
         this.#resourceCache.set(index, url)
         return url
     }
@@ -846,7 +850,8 @@ class MOBI6 {
         const str = await this.loadText(section)
         return this.parser.parseFromString(str, this.#type)
     }
-    async loadSection(section) {
+    async loadSection(section, index) {
+        if (!await dispatchLoad(this.transformTarget, this.#type)) return null
         if (this.#cache.has(section)) return this.#cache.get(section)
         const doc = await this.createDocument(section)
 
@@ -865,7 +870,9 @@ class MOBI6 {
 
         await this.replaceResources(doc)
         const result = this.serializer.serializeToString(doc)
-        const url = URL.createObjectURL(new Blob([result], { type: this.#type }))
+        const [newData, newType] = await dispatchData(
+            this.transformTarget, result, this.#type, index)
+        const url = URL.createObjectURL(new Blob([newData], { type: newType }))
         this.#cache.set(section, url)
         return url
     }
@@ -926,6 +933,24 @@ const replaceSeries = async (str, regex, f) => {
     const results = []
     for (const args of matches) results.push(await f(...args))
     return str.replace(regex, () => results.shift())
+}
+
+const JS_MIME = /\/(x-)?(javascript|ecmascript)/
+
+// same contract as epub.js Loader: `load` can refuse an item, `data` can rewrite bytes
+const dispatchLoad = async (target, type) => {
+    const detail = { type, isScript: JS_MIME.test(type ?? ''), allow: true }
+    const event = new CustomEvent('load', { detail })
+    target.dispatchEvent(event)
+    return await event.detail.allow
+}
+
+const dispatchData = async (target, data, type, name) => {
+    const detail = { data, type }
+    if (name != null) Object.defineProperty(detail, 'name', { value: name }) // readonly
+    const event = new CustomEvent('data', { detail })
+    target.dispatchEvent(event)
+    return [await event.detail.data, await event.detail.type]
 }
 
 const getPageSpread = properties => {
@@ -1021,7 +1046,7 @@ class KF8 {
         this.sections = this.#sections.map((section, index) =>
             section.frags.length ? ({
                 id: index,
-                load: () => this.loadSection(section),
+                load: () => this.loadSection(section, index),
                 createDocument: () => this.createDocument(section),
                 size: section.length,
                 pageSpread: pageSpreads.get(index),
@@ -1088,19 +1113,17 @@ class KF8 {
             : await this.mobi.loadResource(id - 1)
         const result = [MIME.XHTML, MIME.HTML, MIME.CSS, MIME.SVG].includes(type)
             ? await this.replaceResources(this.mobi.decode(raw)) : raw
-        const detail = { data: result, type }
-        const event = new CustomEvent('data', { detail })
-        this.transformTarget.dispatchEvent(event)
-        const newData = await event.detail.data
-        const newType = await event.detail.type
+        const [newData, newType] = await dispatchData(this.transformTarget, result, type, str)
         const doc = newType === MIME.SVG ? this.parser.parseFromString(newData, newType) : null
-        return [new Blob([newData], { newType }),
+        return [new Blob([newData], { type: newType }),
             // SVG wrappers need to be inlined
             // as browsers don't allow external resources when loading SVG as an image
             doc?.getElementsByTagNameNS('http://www.w3.org/2000/svg', 'image')?.length
                 ? doc.documentElement : null]
     }
     async loadResource(str) {
+        const { type } = parseResourceURI(str)
+        if (!await dispatchLoad(this.transformTarget, type)) return ''
         if (this.#cache.has(str)) return this.#cache.get(str)
         const [blob, inline] = await this.loadResourceBlob(str)
         const url = inline ? str : URL.createObjectURL(blob)
@@ -1169,7 +1192,8 @@ class KF8 {
         const str = await this.loadText(section)
         return this.parser.parseFromString(str, this.#type)
     }
-    async loadSection(section) {
+    async loadSection(section, index) {
+        if (!await dispatchLoad(this.transformTarget, this.#type)) return null
         if (this.#cache.has(section)) return this.#cache.get(section)
         const str = await this.loadText(section)
         const replaced = await this.replaceResources(str)
@@ -1184,8 +1208,10 @@ class KF8 {
             for (const el of doc.querySelectorAll(`img[src="${url}"]`))
                 el.replaceWith(node)
         }
-        const url = URL.createObjectURL(
-            new Blob([this.serializer.serializeToString(doc)], { type: this.#type }))
+        const html = this.serializer.serializeToString(doc)
+        const [newData, newType] = await dispatchData(
+            this.transformTarget, html, this.#type, index)
+        const url = URL.createObjectURL(new Blob([newData], { type: newType }))
         this.#cache.set(section, url)
         return url
     }
